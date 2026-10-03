@@ -9,7 +9,6 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
-    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -19,7 +18,6 @@ if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from widgets.signal_process_curve_canvas import SignalProcessCurveCanvas
-from widgets.curve_generator_dialog import CurveGeneratorDialog
 from widgets.signal_process_spectrum_canvas import SignalProcessSpectrumCanvas
 from widgets.signal_process_well_log_canvas import SignalProcessWellLogCanvas
 
@@ -45,12 +43,9 @@ class SignalProcessWidget(QWidget):
         self.curve_canvas = SignalProcessCurveCanvas()
         self.curve_canvas.curve_file_action_requested.connect(self._handle_curve_file_action)
         self._signal_refresh_pending = False
-        self.curve_generator_button = QPushButton("曲线生成器")
-        self.curve_generator_button.clicked.connect(self._open_curve_generator)
 
         right_layout = QVBoxLayout()
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.addWidget(self.curve_generator_button, 0, Qt.AlignmentFlag.AlignRight)
         right_layout.addWidget(self.spectrum_canvas, 1)
         right_layout.addWidget(self.curve_canvas, 1)
 
@@ -99,10 +94,6 @@ class SignalProcessWidget(QWidget):
         depth_subset, signal_subset = self.well_log_canvas.get_current_analysis_subset()
         if depth_subset.size >= 2:
             self.spectrum_canvas.set_signal_data(depth_subset, signal_subset)
-
-    def _open_curve_generator(self):
-        dialog = CurveGeneratorDialog(self.depth, self)
-        dialog.exec()
 
     def _gaussian_trend(self, center, sigma):
         return (
