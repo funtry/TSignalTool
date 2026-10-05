@@ -1,9 +1,13 @@
 import sys
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.font_manager import FontProperties, findfont
 from matplotlib.figure import Figure
+from PyQt6.QtCore import QByteArray, QMimeData, Qt
+from PyQt6.QtGui import QImage
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -14,6 +18,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QMenu,
     QPushButton,
     QSpinBox,
     QStackedWidget,
@@ -35,7 +40,7 @@ class CurveGeneratorDialog(QDialog):
     def __init__(self, reference_depth=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("曲线生成与导出")
-        self.resize(960, 620)
+        self.resize(1400, 900)
 
         if reference_depth is not None and len(reference_depth) > 1:
             reference_depth = np.asarray(reference_depth, dtype=float)
@@ -63,19 +68,32 @@ class CurveGeneratorDialog(QDialog):
         controls.addRow("采样间隔", self.depth_step)
         controls.addRow(self.parameter_pages)
 
+        self._loaded_curves = [None, None]
+        self.load_curve_buttons = [
+            QPushButton("加载曲线 1 TXT"),
+            QPushButton("加载曲线 2 TXT"),
+        ]
+        self.clear_loaded_button = QPushButton("清除导入")
+        import_buttons = QHBoxLayout()
+        for index, button in enumerate(self.load_curve_buttons):
+            button.clicked.connect(lambda _checked=False, i=index: self._load_curve(i))
+            import_buttons.addWidget(button)
+        self.clear_loaded_button.clicked.connect(self._clear_loaded_curves)
+        import_buttons.addWidget(self.clear_loaded_button)
+        controls.addRow("两曲线差值", import_buttons)
+
         self.figure = Figure(figsize=(7, 5), dpi=100)
         self.axes = self.figure.add_subplot(111)
         self.canvas = FigureCanvasQTAgg(self.figure)
+        self.canvas.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.canvas.customContextMenuRequested.connect(self._show_plot_context_menu)
         self.status_label = QLabel()
         self.status_label.setWordWrap(True)
+        self.plot_font = self._find_chinese_font()
 
-        preview_layout = QVBoxLayout()
-        preview_layout.addWidget(self.canvas, 1)
-        preview_layout.addWidget(self.status_label)
-
-        content = QHBoxLayout()
-        content.addLayout(controls, 0)
-        content.addLayout(preview_layout, 1)
+        top_layout = QHBoxLayout()
+        top_layout.addLayout(controls)
+        top_layout.addStretch(1)
 
         self.export_button = QPushButton("导出 TXT")
         close_button = QPushButton("关闭")
@@ -85,7 +103,9 @@ class CurveGeneratorDialog(QDialog):
         button_layout.addWidget(close_button)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(content, 1)
+        layout.addLayout(top_layout)
+        layout.addWidget(self.canvas, 1)
+        layout.addWidget(self.status_label)
         layout.addLayout(button_layout)
 
         self.curve_type.currentIndexChanged.connect(self._select_parameter_page)
@@ -98,6 +118,44 @@ class CurveGeneratorDialog(QDialog):
         close_button.clicked.connect(self.reject)
 
         self._refresh_preview()
+
+    @staticmethod
+    def _find_chinese_font():
+        for family in ("Microsoft YaHei", "SimHei", "DengXian"):
+            try:
+                font_path = findfont(
+                    FontProperties(family=family),
+                    fallback_to_default=False,
+                )
+            except ValueError:
+                continue
+            return FontProperties(fname=font_path)
+        return FontProperties()
+
+    def _show_plot_context_menu(self, position):
+        menu = QMenu(self.canvas)
+        copy_action = menu.addAction("复制")
+        copy_action.triggered.connect(self._copy_plot_to_clipboard)
+        menu.exec(self.canvas.mapToGlobal(position))
+
+    def _copy_plot_to_clipboard(self):
+        png_buffer = BytesIO()
+        self.figure.savefig(
+            png_buffer,
+            format="png",
+            dpi=300,
+            transparent=True,
+        )
+        png_data = png_buffer.getvalue()
+        image = QImage.fromData(png_data, "PNG")
+        dots_per_meter = round(300 / 0.0254)
+        image.setDotsPerMeterX(dots_per_meter)
+        image.setDotsPerMeterY(dots_per_meter)
+
+        mime_data = QMimeData()
+        mime_data.setImageData(image)
+        mime_data.setData("image/png", QByteArray(png_data))
+        QApplication.clipboard().setMimeData(mime_data)
 
     @staticmethod
     def _float_input(value, minimum, maximum, decimals=4):
@@ -208,6 +266,10 @@ class CurveGeneratorDialog(QDialog):
         )
 
     def _refresh_preview(self, *_args):
+        if all(curve is not None for curve in self._loaded_curves):
+            self._refresh_difference_preview()
+            return
+
         try:
             self.depth = self._make_depth()
             self.values = self._generate_values(self.depth)
@@ -218,7 +280,7 @@ class CurveGeneratorDialog(QDialog):
 
         self.export_button.setEnabled(True)
         self.axes.clear()
-        self.axes.plot(self.depth, self.values, color="#0072B2", linewidth=1.1)
+        self.axes.plot(self.depth, self.values, color="#0000FF", linewidth=1.1)
         self.axes.set_xlabel("Depth (m)")
         self.axes.set_ylabel("Value")
         self.axes.grid(True, alpha=0.25)
@@ -226,9 +288,108 @@ class CurveGeneratorDialog(QDialog):
         self.canvas.draw_idle()
         self.status_label.setText(f"{self.depth.size} 个采样点；TXT 将导出为深度和值两列。")
 
+    def _load_curve(self, curve_index):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            f"加载曲线 {curve_index + 1}",
+            "",
+            "文本文件 (*.txt);;所有文件 (*)",
+        )
+        if not file_path:
+            return
+
+        try:
+            data = np.loadtxt(file_path, dtype=float)
+        except (OSError, ValueError):
+            QMessageBox.warning(self, "数据格式不正确", "文件必须包含两列深度和曲线值。")
+            return
+
+        if (
+            data.ndim != 2
+            or data.shape[1] != 2
+            or data.shape[0] < 2
+            or not np.all(np.isfinite(data))
+            or np.any(np.diff(data[:, 0]) <= 0)
+        ):
+            QMessageBox.warning(
+                self,
+                "数据格式不正确",
+                "文件必须包含至少两行有限数值，深度和值各一列，且深度严格递增。",
+            )
+            return
+
+        self._loaded_curves[curve_index] = (
+            data[:, 0].copy(),
+            data[:, 1].copy(),
+            Path(file_path).name,
+        )
+        self.load_curve_buttons[curve_index].setText(Path(file_path).name)
+        self._refresh_preview()
+
+    def _clear_loaded_curves(self):
+        self._loaded_curves = [None, None]
+        for index, button in enumerate(self.load_curve_buttons):
+            button.setText(f"加载曲线 {index + 1} TXT")
+        self._refresh_preview()
+
+    def _refresh_difference_preview(self):
+        (first_depth, first_values, first_name), (
+            second_depth,
+            second_values,
+            second_name,
+        ) = self._loaded_curves
+        overlap_start = max(first_depth[0], second_depth[0])
+        overlap_stop = min(first_depth[-1], second_depth[-1])
+        mask = (first_depth >= overlap_start) & (first_depth <= overlap_stop)
+        depth = first_depth[mask]
+        if depth.size < 2:
+            self.export_button.setEnabled(False)
+            self.status_label.setText("两条曲线的重叠深度范围内采样点不足，无法计算差值。")
+            return
+
+        first_values = first_values[mask]
+        aligned_second_values = np.interp(depth, second_depth, second_values)
+        difference = first_values - aligned_second_values
+        self.depth = depth
+        self.values = difference
+
+        self.export_button.setEnabled(True)
+        self.axes.clear()
+        self.axes.plot(
+            first_depth,
+            self._loaded_curves[0][1],
+            color="#0000FF",
+            linewidth=1.1,
+            label=first_name,
+        )
+        self.axes.plot(
+            second_depth,
+            self._loaded_curves[1][1],
+            color="#FF0000",
+            linewidth=1.1,
+            label=second_name,
+        )
+        self.axes.plot(
+            depth,
+            difference,
+            color="#00FF00",
+            linewidth=1.3,
+            label="曲线B - 曲线R",
+        )
+        self.axes.set_xlabel("Depth (m)")
+        self.axes.set_ylabel("Value")
+        self.axes.grid(True, alpha=0.25)
+        self.axes.legend(prop=self.plot_font)
+        self.figure.tight_layout()
+        self.canvas.draw_idle()
+        self.status_label.setText(
+            f"差值 = 曲线B - 曲线R；重叠区间 {depth[0]:.6g} 至 {depth[-1]:.6g}，"
+            f"{depth.size} 个采样点；导出仅包含差值曲线。"
+        )
+
     def _export_curve(self):
-        kind = self.curve_type.currentData()
-        label = self.curve_type.currentText()
+        difference_mode = all(curve is not None for curve in self._loaded_curves)
+        label = "曲线差值" if difference_mode else self.curve_type.currentText()
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "导出曲线",

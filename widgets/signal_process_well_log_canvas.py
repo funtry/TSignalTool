@@ -1,11 +1,14 @@
 import numpy as np
+from matplotlib.backend_bases import MouseButton
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import QLabel, QMenu, QSizePolicy, QVBoxLayout, QWidget
 
 
 class SignalProcessWellLogCanvas(QWidget):
+    curve_file_action_requested = pyqtSignal(str)
+
     def __init__(self, parent=None, width=4, height=8, dpi=100):
         super().__init__(parent)
         self.fig = Figure(figsize=(width, height), dpi=dpi)
@@ -19,11 +22,28 @@ class SignalProcessWellLogCanvas(QWidget):
         self.range_slider = None
         self.depth = np.asarray([], dtype=float)
         self.signal = np.asarray([], dtype=float)
+        self.comparison_signal = None
         self.selected_indices = (0, -1)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.canvas)
+        self.import_context_menu_enabled = False
+        self.canvas.mpl_connect("button_press_event", self._show_context_menu)
+
+    def _show_context_menu(self, event):
+        if (
+            not self.import_context_menu_enabled
+            or event.button != MouseButton.RIGHT
+            or event.inaxes is not self.ax
+        ):
+            return
+
+        menu = QMenu(self)
+        import_action = menu.addAction("导入测井曲线")
+        chosen = menu.exec(self.canvas.mapToGlobal(event.guiEvent.pos()))
+        if chosen == import_action:
+            self.curve_file_action_requested.emit("import")
 
     def attach_depth_selection_ui(self, slider=None, label=None):
         if slider is not None:
@@ -43,6 +63,16 @@ class SignalProcessWellLogCanvas(QWidget):
         if self.selected_indices[1] < 0 or self.selected_indices[1] >= depth_arr.size:
             self.selected_indices = (0, depth_arr.size - 1)
         self._sync_selection_controls()
+        self._render_curve()
+
+    def set_comparison_signal(self, signal=None):
+        if signal is None:
+            self.comparison_signal = None
+        else:
+            comparison = np.asarray(signal, dtype=float).reshape(-1)
+            self.comparison_signal = (
+                comparison.copy() if comparison.size == self.depth.size else None
+            )
         self._render_curve()
 
     def _sync_selection_controls(self):
@@ -99,5 +129,12 @@ class SignalProcessWellLogCanvas(QWidget):
             color="#0000FF",
             linewidth=1.15,
         )
+        if self.comparison_signal is not None:
+            self.ax.plot(
+                self.comparison_signal,
+                self.depth,
+                color="#FF0000",
+                linewidth=1.1,
+            )
         self.ax.set_ylim(float(self.depth[-1]), float(self.depth[0]))
         self.canvas.draw_idle()
