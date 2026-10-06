@@ -1,4 +1,5 @@
 import sys
+import os
 from io import BytesIO
 from pathlib import Path
 
@@ -69,18 +70,34 @@ class CurveGeneratorDialog(QDialog):
         controls.addRow(self.parameter_pages)
 
         self._loaded_curves = [None, None]
+        self._loaded_three_column_data = None
+        self._showing_hilbert_curve = False
+        self._difference_requested = False
+        self._plotted_curves = []
         self.load_curve_buttons = [
             QPushButton("加载曲线 1 TXT"),
             QPushButton("加载曲线 2 TXT"),
         ]
+        self.take_difference_button = QPushButton("取差值")
+        self.take_difference_button.setEnabled(False)
+        self.take_difference_button.clicked.connect(self._take_difference)
+        self.load_three_column_button = QPushButton("加载三列数据 TXT")
+        self.load_three_column_button.clicked.connect(self._load_three_column_data)
+        self.hilbert_button = QPushButton("Hilbert")
+        self.hilbert_button.clicked.connect(self._show_hilbert_curve)
         self.clear_loaded_button = QPushButton("清除导入")
         import_buttons = QHBoxLayout()
         for index, button in enumerate(self.load_curve_buttons):
             button.clicked.connect(lambda _checked=False, i=index: self._load_curve(i))
             import_buttons.addWidget(button)
+        import_buttons.addWidget(self.take_difference_button)
         self.clear_loaded_button.clicked.connect(self._clear_loaded_curves)
         import_buttons.addWidget(self.clear_loaded_button)
         controls.addRow("两曲线差值", import_buttons)
+        direct_plot_buttons = QHBoxLayout()
+        direct_plot_buttons.addWidget(self.load_three_column_button)
+        direct_plot_buttons.addWidget(self.hilbert_button)
+        controls.addRow("直接绘图", direct_plot_buttons)
 
         self.figure = Figure(figsize=(7, 5), dpi=100)
         self.axes = self.figure.add_subplot(111)
@@ -121,6 +138,17 @@ class CurveGeneratorDialog(QDialog):
 
     @staticmethod
     def _find_chinese_font():
+        fonts_dir = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+        for font_name in (
+            "Noto Sans SC (TrueType).otf",
+            "Deng.ttf",
+            "simhei.ttf",
+            "simsun.ttc",
+        ):
+            font_path = fonts_dir / font_name
+            if font_path.is_file():
+                return FontProperties(fname=str(font_path))
+
         for family in ("Microsoft YaHei", "SimHei", "DengXian"):
             try:
                 font_path = findfont(
@@ -134,9 +162,40 @@ class CurveGeneratorDialog(QDialog):
 
     def _show_plot_context_menu(self, position):
         menu = QMenu(self.canvas)
+        if self._plotted_curves:
+            ordinals = ("第一", "第二", "第三")
+            for index, curve in enumerate(self._plotted_curves[:3]):
+                action = menu.addAction(f"导出{ordinals[index]}条曲线")
+                action.triggered.connect(
+                    lambda _checked=False, curve_index=index: self._export_plotted_curve(curve_index)
+                )
+            menu.addSeparator()
         copy_action = menu.addAction("复制")
         copy_action.triggered.connect(self._copy_plot_to_clipboard)
         menu.exec(self.canvas.mapToGlobal(position))
+
+    def _export_plotted_curve(self, curve_index):
+        if not 0 <= curve_index < len(self._plotted_curves):
+            return
+        depth, values, label = self._plotted_curves[curve_index]
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            f"导出{label}",
+            f"{label}.txt",
+            "文本文件 (*.txt)",
+        )
+        if not file_path:
+            return
+        try:
+            np.savetxt(
+                file_path,
+                np.column_stack((depth, values)),
+                fmt="%.10f",
+            )
+        except OSError as error:
+            QMessageBox.warning(self, "导出失败", str(error))
+            return
+        self.status_label.setText(f"已导出 {depth.size} 个采样点：{Path(file_path).name}")
 
     def _copy_plot_to_clipboard(self):
         png_buffer = BytesIO()
@@ -266,8 +325,14 @@ class CurveGeneratorDialog(QDialog):
         )
 
     def _refresh_preview(self, *_args):
+        if self._loaded_three_column_data is not None:
+            self._refresh_three_column_preview()
+            return
         if all(curve is not None for curve in self._loaded_curves):
-            self._refresh_difference_preview()
+            if self._difference_requested:
+                self._refresh_difference_preview()
+            else:
+                self._refresh_loaded_curves_preview()
             return
 
         try:
@@ -281,12 +346,186 @@ class CurveGeneratorDialog(QDialog):
         self.export_button.setEnabled(True)
         self.axes.clear()
         self.axes.plot(self.depth, self.values, color="#0000FF", linewidth=1.1)
+        self._plotted_curves = [(self.depth.copy(), self.values.copy(), "曲线")]
         self.axes.set_xlabel("Depth (m)")
         self.axes.set_ylabel("Value")
         self.axes.grid(True, alpha=0.25)
         self.figure.tight_layout()
         self.canvas.draw_idle()
         self.status_label.setText(f"{self.depth.size} 个采样点；TXT 将导出为深度和值两列。")
+
+    def _load_three_column_data(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "加载三列数据",
+            "",
+            "文本文件 (*.txt);;所有文件 (*)",
+        )
+        if not file_path:
+            return
+
+        try:
+            data = np.loadtxt(file_path, dtype=float, ndmin=2)
+        except (OSError, ValueError):
+            QMessageBox.warning(self, "数据格式不正确", "文件必须包含三列深度和数据。")
+            return
+
+        if (
+            data.shape[1] != 3
+            or data.shape[0] < 2
+            or not np.all(np.isfinite(data))
+            or np.any(np.diff(data[:, 0]) <= 0)
+        ):
+            QMessageBox.warning(
+                self,
+                "数据格式不正确",
+                "文件必须包含至少两行有限数值，第一列为严格递增的深度，第二、三列为数据。",
+            )
+            return
+
+        self._loaded_three_column_data = (
+            data[:, 0].copy(),
+            data[:, 1].copy(),
+            data[:, 2].copy(),
+            Path(file_path).name,
+        )
+        self._showing_hilbert_curve = False
+        self._difference_requested = False
+        self._loaded_curves = [None, None]
+        self.take_difference_button.setEnabled(False)
+        self.take_difference_button.setEnabled(False)
+        for index, button in enumerate(self.load_curve_buttons):
+            button.setText(f"加载曲线 {index + 1} TXT")
+        self.load_three_column_button.setText(Path(file_path).name)
+        self._refresh_three_column_preview()
+
+    def _refresh_three_column_preview(self):
+        depth, first_values, second_values, file_name = self._loaded_three_column_data
+        self.depth = depth
+        self.values = None
+        self.export_button.setEnabled(False)
+        self.axes.clear()
+        if self._showing_hilbert_curve:
+            with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                ratio = np.divide(
+                    first_values,
+                    second_values,
+                    out=np.full(first_values.shape, np.nan, dtype=float),
+                    where=second_values != 0,
+                )
+            ratio[~np.isfinite(ratio)] = np.nan
+            valid_count = int(np.count_nonzero(np.isfinite(ratio)))
+            self.axes.plot(
+                depth,
+                first_values,
+                color="#0000FF",
+                linewidth=1.2,
+                label=f"{file_name} 第2列",
+            )
+            self.axes.plot(
+                depth,
+                second_values,
+                color="#FF0000",
+                linewidth=0.8,
+                label=f"{file_name} 第3列",
+            )
+            self.axes.plot(
+                depth,
+                ratio,
+                color="#00FFFF",
+                linewidth=1.5,
+                label="Hilbert（第2列 / 第3列）",
+            )
+            self._plotted_curves = [
+                (depth.copy(), first_values.copy(), "第一条曲线"),
+                (depth.copy(), second_values.copy(), "第二条曲线"),
+                (depth.copy(), ratio.copy(), "第三条曲线"),
+            ]
+            self.axes.set_xlabel("Depth (m)")
+            self.axes.set_ylabel("Value", fontproperties=self.plot_font)
+            self.axes.grid(True, alpha=0.25)
+            self.axes.legend(prop=self.plot_font)
+            self.figure.tight_layout()
+            self.canvas.draw_idle()
+            self.status_label.setText(
+                f"{file_name}；Hilbert 比值曲线有效点 {valid_count}/{depth.size}。"
+            )
+            return
+
+        self.axes.plot(
+            depth,
+            first_values,
+            color="#0000FF",
+            linewidth=1.2,
+            label=f"{file_name} 第2列",
+        )
+        self.axes.plot(
+            depth,
+            second_values,
+            color="#FF0000",
+            linewidth=0.8,
+            label=f"{file_name} 第3列",
+        )
+        self._plotted_curves = [
+            (depth.copy(), first_values.copy(), "第一条曲线"),
+            (depth.copy(), second_values.copy(), "第二条曲线"),
+        ]
+        self.axes.set_xlabel("Depth (m)")
+        self.axes.set_ylabel("Value")
+        self.axes.grid(True, alpha=0.25)
+        self.axes.legend(prop=self.plot_font)
+        self.figure.tight_layout()
+        self.canvas.draw_idle()
+        self.status_label.setText(
+            f"{file_name}；按深度绘制第2列和第3列，共 {depth.size} 个采样点。"
+        )
+
+    def _show_hilbert_curve(self):
+        if self._loaded_three_column_data is None:
+            self.status_label.setText("请先加载三列数据 TXT。")
+            return
+        self._showing_hilbert_curve = True
+        self._refresh_three_column_preview()
+
+    def _refresh_loaded_curves_preview(self):
+        first_depth, first_values, first_name = self._loaded_curves[0]
+        second_depth, second_values, second_name = self._loaded_curves[1]
+        self.depth = first_depth
+        self.values = None
+        self.export_button.setEnabled(False)
+        self.axes.clear()
+        self.axes.plot(
+            first_depth,
+            first_values,
+            color="#0000FF",
+            linewidth=1.2,
+            label=first_name,
+        )
+        self.axes.plot(
+            second_depth,
+            second_values,
+            color="#FF0000",
+            linewidth=0.8,
+            label=second_name,
+        )
+        self._plotted_curves = [
+            (first_depth.copy(), first_values.copy(), "第一条曲线"),
+            (second_depth.copy(), second_values.copy(), "第二条曲线"),
+        ]
+        self.axes.set_xlabel("Depth (m)")
+        self.axes.set_ylabel("Value")
+        self.axes.grid(True, alpha=0.25)
+        self.axes.legend(prop=self.plot_font)
+        self.figure.tight_layout()
+        self.canvas.draw_idle()
+        self.status_label.setText("两条曲线已加载；点击“取差值”计算曲线1减曲线2。")
+
+    def _take_difference(self):
+        if not all(curve is not None for curve in self._loaded_curves):
+            self.status_label.setText("请先加载两条 TXT 曲线。")
+            return
+        self._difference_requested = True
+        self._refresh_difference_preview()
 
     def _load_curve(self, curve_index):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -323,13 +562,25 @@ class CurveGeneratorDialog(QDialog):
             data[:, 1].copy(),
             Path(file_path).name,
         )
+        self._loaded_three_column_data = None
+        self._showing_hilbert_curve = False
+        self._difference_requested = False
+        self.take_difference_button.setEnabled(
+            all(curve is not None for curve in self._loaded_curves)
+        )
+        self.load_three_column_button.setText("加载三列数据 TXT")
         self.load_curve_buttons[curve_index].setText(Path(file_path).name)
         self._refresh_preview()
 
     def _clear_loaded_curves(self):
         self._loaded_curves = [None, None]
+        self._loaded_three_column_data = None
+        self._showing_hilbert_curve = False
+        self._difference_requested = False
+        self.take_difference_button.setEnabled(False)
         for index, button in enumerate(self.load_curve_buttons):
             button.setText(f"加载曲线 {index + 1} TXT")
+        self.load_three_column_button.setText("加载三列数据 TXT")
         self._refresh_preview()
 
     def _refresh_difference_preview(self):
@@ -359,23 +610,28 @@ class CurveGeneratorDialog(QDialog):
             first_depth,
             self._loaded_curves[0][1],
             color="#0000FF",
-            linewidth=1.1,
+            linewidth=1.2,
             label=first_name,
         )
         self.axes.plot(
             second_depth,
             self._loaded_curves[1][1],
             color="#FF0000",
-            linewidth=1.1,
+            linewidth=0.8,
             label=second_name,
         )
         self.axes.plot(
             depth,
             difference,
             color="#00FF00",
-            linewidth=1.3,
+            linewidth=1.5,
             label="曲线B - 曲线R",
         )
+        self._plotted_curves = [
+            (first_depth.copy(), self._loaded_curves[0][1].copy(), "第一条曲线"),
+            (second_depth.copy(), self._loaded_curves[1][1].copy(), "第二条曲线"),
+            (depth.copy(), difference.copy(), "第三条曲线"),
+        ]
         self.axes.set_xlabel("Depth (m)")
         self.axes.set_ylabel("Value")
         self.axes.grid(True, alpha=0.25)
@@ -383,12 +639,14 @@ class CurveGeneratorDialog(QDialog):
         self.figure.tight_layout()
         self.canvas.draw_idle()
         self.status_label.setText(
-            f"差值 = 曲线B - 曲线R；重叠区间 {depth[0]:.6g} 至 {depth[-1]:.6g}，"
+            f"差值 = 曲线1 - 曲线2；重叠区间 {depth[0]:.6g} 至 {depth[-1]:.6g}，"
             f"{depth.size} 个采样点；导出仅包含差值曲线。"
         )
 
     def _export_curve(self):
-        difference_mode = all(curve is not None for curve in self._loaded_curves)
+        difference_mode = self._difference_requested and all(
+            curve is not None for curve in self._loaded_curves
+        )
         label = "曲线差值" if difference_mode else self.curve_type.currentText()
         file_path, _ = QFileDialog.getSaveFileName(
             self,

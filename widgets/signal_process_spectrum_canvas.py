@@ -193,6 +193,15 @@ class SignalProcessSpectrumCanvas(QWidget):
                     for center in centers:
                         if period[0] <= center <= period[-1]:
                             self.ax.axvspan(center * 0.9, center * 1.1, color="#888888", alpha=0.12)
+                            self.ax.text(
+                                center,
+                                self.ax.get_ylim()[1] * 0.88,
+                                f"{center:.3f} m",
+                                ha="center",
+                                va="top",
+                                color="#555555",
+                                fontsize=7,
+                            )
                     self.ax.scatter(period[significant], power[significant], s=22, facecolors="none", edgecolors="#333333")
             if confidence:
                 self.ax.legend(loc="best", fontsize=7, ncol=3)
@@ -201,6 +210,17 @@ class SignalProcessSpectrumCanvas(QWidget):
             "top", functions=(lambda value: 1.0 / np.maximum(value, 1e-12), lambda value: 1.0 / np.maximum(value, 1e-12))
         )
         self.ax_top_freq.set_xlabel("Frequency (1/m)")
+
+    def get_e_wavelength(self):
+        result = self.results.get(self.method_combo.currentText())
+        if result is None or "period" not in result or "power" not in result:
+            return np.nan
+        period = np.asarray(result["period"], dtype=float)
+        power = np.asarray(result["power"], dtype=float)
+        if period.size == 0 or power.size == 0:
+            return np.nan
+        order = np.argsort(period)
+        return float(period[order][np.argmax(power[order])])
 
     def _render_stft(self, result):
         period = result["period"]

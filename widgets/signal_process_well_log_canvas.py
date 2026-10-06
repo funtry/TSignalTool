@@ -23,6 +23,7 @@ class SignalProcessWellLogCanvas(QWidget):
         self.depth = np.asarray([], dtype=float)
         self.signal = np.asarray([], dtype=float)
         self.comparison_signal = None
+        self.trend_overlay_signal = None
         self.selected_indices = (0, -1)
 
         layout = QVBoxLayout(self)
@@ -72,6 +73,16 @@ class SignalProcessWellLogCanvas(QWidget):
             comparison = np.asarray(signal, dtype=float).reshape(-1)
             self.comparison_signal = (
                 comparison.copy() if comparison.size == self.depth.size else None
+            )
+        self._render_curve()
+
+    def set_trend_overlay_signal(self, signal=None):
+        if signal is None:
+            self.trend_overlay_signal = None
+        else:
+            trend = np.asarray(signal, dtype=float).reshape(-1)
+            self.trend_overlay_signal = (
+                trend.copy() if trend.size == self.depth.size else None
             )
         self._render_curve()
 
@@ -135,6 +146,13 @@ class SignalProcessWellLogCanvas(QWidget):
                 self.depth,
                 color="#FF0000",
                 linewidth=1.1,
+            )
+        if self.trend_overlay_signal is not None:
+            self.ax.plot(
+                self.trend_overlay_signal,
+                self.depth,
+                color="#009E73",
+                linewidth=1.2,
             )
         self.ax.set_ylim(float(self.depth[-1]), float(self.depth[0]))
         self.canvas.draw_idle()
