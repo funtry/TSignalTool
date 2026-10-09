@@ -46,6 +46,13 @@ class SignalProcessSpectrumCanvas(QWidget):
         self.signal = np.asarray([], dtype=float)
         self.show_annotations = True
         self.ax_top_freq = None
+        self.reference_wavelengths = ()
+
+    def set_reference_wavelengths(self, wavelengths):
+        values = np.asarray(wavelengths, dtype=float).reshape(-1)
+        if values.size != 4 or not np.all(np.isfinite(values)) or np.any(values <= 0):
+            raise ValueError("Exactly four positive finite reference wavelengths are required.")
+        self.reference_wavelengths = tuple(float(value) for value in values)
 
     def set_signal_data(self, depth, signal):
         depth_arr = np.asarray(depth, dtype=float).reshape(-1)
@@ -181,27 +188,25 @@ class SignalProcessSpectrumCanvas(QWidget):
                 )
 
         if self.show_annotations:
+            for label, center in zip(("E", "e", "O", "P"), self.reference_wavelengths):
+                if period[0] <= center <= period[-1]:
+                    self.ax.axvspan(center * 0.9, center * 1.1, color="#888888", alpha=0.12)
+                    self.ax.text(
+                        center,
+                        self.ax.get_ylim()[1] * 0.88,
+                        f"{label}: {center:.3f} m",
+                        ha="center",
+                        va="top",
+                        color="#555555",
+                        fontsize=7,
+                    )
+
             c99 = confidence.get("0.99")
             if c99 is not None:
                 c99 = np.asarray(c99, dtype=float)[order]
                 peaks, _ = find_peaks(power)
                 significant = peaks[power[peaks] > c99[peaks]]
                 if significant.size:
-                    base_index = significant[np.argmax(period[significant])]
-                    base = float(period[base_index])
-                    centers = (base, base / 4.0, base / 10.0, base / 20.0)
-                    for center in centers:
-                        if period[0] <= center <= period[-1]:
-                            self.ax.axvspan(center * 0.9, center * 1.1, color="#888888", alpha=0.12)
-                            self.ax.text(
-                                center,
-                                self.ax.get_ylim()[1] * 0.88,
-                                f"{center:.3f} m",
-                                ha="center",
-                                va="top",
-                                color="#555555",
-                                fontsize=7,
-                            )
                     self.ax.scatter(period[significant], power[significant], s=22, facecolors="none", edgecolors="#333333")
             if confidence:
                 self.ax.legend(loc="best", fontsize=7, ncol=3)

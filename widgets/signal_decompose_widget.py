@@ -25,8 +25,10 @@ class SignalDecomposeWidget(SignalProcessWidget):
         self.lowess_slider = self.curve_canvas.add_trend_smoothing_control()
         self.lowess_slider.valueChanged.connect(self._decompose_and_display)
         self.lowess_slider.valueChanged.connect(self._update_lowess_window_label)
-        self.e_period_spinbox = self.curve_canvas.add_e_period_control(initial_cycles=13)
-        self.e_period_spinbox.valueChanged.connect(self._decompose_and_display)
+        self.e_wavelength_spinbox = self.curve_canvas.add_e_wavelength_control(
+            initial_wavelength=6.0
+        )
+        self.e_wavelength_spinbox.valueChanged.connect(self._decompose_and_display)
         self.gaussian_filter_spinbox = self.curve_canvas.add_gaussian_filter_control(initial_value=1.0)
         self.gaussian_filter_spinbox.valueChanged.connect(self._decompose_and_display)
         self.original_depth = None
@@ -89,26 +91,13 @@ class SignalDecomposeWidget(SignalProcessWidget):
         self._update_lowess_window_label()
         self._decompose_and_display()
 
-    def _decompose(self, depth, signal, smooth_percent, e_cycles, high_pass_cutoff):
+    def _decompose(self, depth, signal, smooth_percent, e_wavelength, high_pass_cutoff):
         count = signal.size
         frac = float(np.clip(smooth_percent / 100.0, 0.01, 1.0))
         trend = lowess(signal, depth, frac=frac, it=2, return_sorted=False)
         dx = float(np.median(np.diff(depth)))
         nyquist = 0.5 / dx
         depth_span = float(depth[-1] - depth[0])
-        cycle_count = max(1, int(np.floor(float(e_cycles))))
-        phase_fraction = float(e_cycles) - cycle_count
-        e_period = depth_span / cycle_count
-        periods = e_period * np.asarray((1.0, 5.0 / 20.0, 2.0 / 20.0, 1.0 / 20.0))
-
-        phases = (
-            2.0 * np.pi * (depth - depth[0])[:, None] / periods[None, :]
-            + 2.0 * np.pi * phase_fraction
-        )
-        orbital_waves = np.sin(phases)
-        ratios = np.asarray((20.0, 5.0, 2.0, 1.0))
-        components = orbital_waves * (ratios / ratios.sum())[None, :]
-        components = [components[:, index] for index in range(components.shape[1])]
 
         center_wavelength = float(np.clip(high_pass_cutoff, 0.1, max(0.1, depth_span)))
         cutoff = 1.0 / center_wavelength
@@ -118,10 +107,49 @@ class SignalDecomposeWidget(SignalProcessWidget):
         else:
             noise = np.zeros_like(signal)
 
-        residual = signal - trend - noise
-        amplitude = np.abs(hilbert(residual))
+        detrended_signal = signal - trend - noise
+        wavelengths = float(e_wavelength) * np.asarray((1.0, 5.0 / 20.0, 2.0 / 20.0, 1.0 / 20.0))
+        center_frequencies = 1.0 / wavelengths
+        frequency_edges = np.empty(center_frequencies.size + 1, dtype=float)
+        frequency_edges[1:-1] = np.sqrt(center_frequencies[:-1] * center_frequencies[1:])
+        frequency_edges[0] = center_frequencies[0] ** 1.5 / np.sqrt(center_frequencies[1])
+        frequency_edges[-1] = center_frequencies[-1] ** 1.5 / np.sqrt(center_frequencies[-2])
 
-        return trend, amplitude, components, noise, periods
+        components = []
+        for index, center_frequency in enumerate(center_frequencies):
+            low_frequency = float(frequency_edges[index])
+            high_frequency = min(float(frequency_edges[index + 1]), nyquist * 0.99)
+            if center_frequency >= nyquist or low_frequency >= high_frequency:
+                components.append(np.zeros_like(signal))
+                continue
+
+            component_sos = butter(
+                2,
+                (low_frequency, high_frequency),
+                btype="bandpass",
+                fs=1.0 / dx,
+                output="sos",
+            )
+            components.append(
+                sosfiltfilt(
+                    component_sos,
+                    detrended_signal,
+                    padlen=min(9, count - 1),
+                )
+            )
+
+        e_signal = components[0]
+        amplitude = np.abs(hilbert(e_signal))
+        amplitude_floor = np.finfo(float).eps * max(float(np.max(amplitude)), 1.0)
+        normalized_e = np.divide(
+            e_signal,
+            amplitude,
+            out=np.zeros_like(e_signal),
+            where=amplitude > amplitude_floor,
+        )
+        components[0] = normalized_e
+
+        return trend, amplitude, components, noise, wavelengths
 
     def _decompose_and_display(self, *_args):
         if self.original_depth is None or self.original_signal is None:
@@ -129,36 +157,44 @@ class SignalDecomposeWidget(SignalProcessWidget):
 
         depth = self.original_depth
         signal = self.original_signal
-        trend, amplitude, components, noise, periods = self._decompose(
+        trend, amplitude, components, noise, wavelengths = self._decompose(
             depth,
             signal,
             self.lowess_slider.value(),
-            self.e_period_spinbox.value(),
+            self.e_wavelength_spinbox.value(),
             self.gaussian_filter_spinbox.value(),
         )
         self.signal_curves = [trend, amplitude, *components, noise]
-        oscillatory_signal = amplitude * np.sum(components, axis=0)
-        self.spectral_signal = oscillatory_signal
-        self.total_signal = trend + oscillatory_signal + noise
+        red_signal = (
+            amplitude * components[0]
+            + components[1]
+            + components[2]
+            + components[3]
+        )
+        self.spectral_signal = red_signal
+        self.total_signal = trend + red_signal + noise
         self.track_annotations = (
             f"LOWESS {self.lowess_slider.value()}%",
             "Hilbert envelope",
-            f"Sinusoid: {self.e_period_spinbox.value():g} cycles",
-            f"Sinusoid: {self.e_period_spinbox.value() * 4:g} cycles",
-            f"Sinusoid: {self.e_period_spinbox.value() * 10:g} cycles",
-            f"Sinusoid: {self.e_period_spinbox.value() * 20:g} cycles",
+            f"Band-pass: {wavelengths[0]:g} m",
+            f"Band-pass: {wavelengths[1]:g} m",
+            f"Band-pass: {wavelengths[2]:g} m",
+            f"Band-pass: {wavelengths[3]:g} m",
             "High-pass filtered input",
         )
 
         self.well_log_canvas.set_data(depth, signal)
-        self.well_log_canvas.set_comparison_signal(oscillatory_signal)
+        self.well_log_canvas.set_comparison_signal(red_signal)
+        self.well_log_canvas.set_trend_overlay_signal(self.total_signal)
+        self.well_log_canvas.set_residual_overlay_signal(signal - self.total_signal)
         self.curve_canvas.set_curves(depth, self.signal_curves, self.track_annotations)
         self._update_spectrum_for_selected_depth()
         self._update_lowess_window_label()
         self.depth_range_label.setText(
             f"测井已分解：{depth[0]:.2f} ~ {depth[-1]:.2f} m；"
-            f"LOWESS 平滑 {self.lowess_slider.value()}%；E={self.e_period_spinbox.value()} 个周期；"
-            f"红线为 A×(E+e+O+P) 重组曲线。"
+            f"LOWESS 平滑 {self.lowess_slider.value()}%；"
+            f"E波长={self.e_wavelength_spinbox.value():g} m；"
+            "红线为 A×E+e+O+P，绿线为 Trend+A×E+e+O+P+Noise，灰线为残差。"
         )
 
     def _update_lowess_window_label(self, *_args):
@@ -175,26 +211,14 @@ class SignalDecomposeWidget(SignalProcessWidget):
             return
         start, end = self.well_log_canvas.selected_indices
         if end - start + 1 >= 2:
+            self.spectrum_canvas.set_reference_wavelengths(
+                self.e_wavelength_spinbox.value()
+                * np.asarray((1.0, 5.0 / 20.0, 2.0 / 20.0, 1.0 / 20.0))
+            )
             self.spectrum_canvas.set_signal_data(
                 self.original_depth[start:end + 1],
                 self.spectral_signal[start:end + 1],
             )
-            self._update_e_period_from_spectrum()
-
-    def _update_e_period_from_spectrum(self):
-        start, end = self.well_log_canvas.selected_indices
-        if start >= end:
-            return
-        depth_span = float(self.original_depth[end] - self.original_depth[start])
-        wavelength = self.spectrum_canvas.get_e_wavelength()
-        if not np.isfinite(wavelength) or wavelength <= 0 or not np.isfinite(depth_span):
-            return
-        cycles = float(np.rint(depth_span / wavelength))
-        cycles = max(1.0, min(cycles, 10000.0))
-        phase_fraction = self.e_period_spinbox.value() % 1.0
-        self.e_period_spinbox.blockSignals(True)
-        self.e_period_spinbox.setValue(cycles + phase_fraction)
-        self.e_period_spinbox.blockSignals(False)
 
     def _refresh_signal_for_selected_depth(self):
         self._signal_refresh_pending = False

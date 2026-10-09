@@ -47,7 +47,7 @@ class SignalProcessCurveCanvas(QWidget):
         self.canvas = FigureCanvasQTAgg(self.fig)
         self.canvas.setParent(self)
         self.canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.e_period_spinbox = None
+        self.e_wavelength_spinbox = None
         self.gaussian_filter_spinbox = None
 
         layout = QVBoxLayout(self)
@@ -156,24 +156,25 @@ class SignalProcessCurveCanvas(QWidget):
         self.trend_window_spinbox.setValue(float(depth_span) * self.trend_smoothing_slider.value() / 100.0)
         self.trend_window_spinbox.blockSignals(False)
 
-    def add_e_period_control(self, initial_cycles=13):
-        if self.e_period_spinbox is not None:
-            return self.e_period_spinbox
+    def add_e_wavelength_control(self, initial_wavelength=6.0):
+        if self.e_wavelength_spinbox is not None:
+            return self.e_wavelength_spinbox
 
         control = QWidget(self.canvas)
         layout = QHBoxLayout(control)
         layout.setContentsMargins(4, 1, 4, 1)
         layout.setSpacing(4)
         spin_box = QDoubleSpinBox(control)
-        spin_box.setRange(1.00, 10000.99)
+        spin_box.setRange(0.01, 10000.0)
         spin_box.setDecimals(2)
-        spin_box.setSingleStep(0.05)
-        spin_box.setValue(float(initial_cycles))
+        spin_box.setSingleStep(0.1)
+        spin_box.setSuffix(" m")
+        spin_box.setValue(float(initial_wavelength))
         spin_box.setKeyboardTracking(False)
         spin_box.setFixedWidth(90)
         layout.addWidget(spin_box)
         control.setStyleSheet("QWidget { background: rgba(255, 255, 255, 180); }")
-        self.e_period_spinbox = spin_box
+        self.e_wavelength_spinbox = spin_box
         self.track_controls[2] = control
         self.canvas.mpl_connect("draw_event", lambda event: self._position_control(control, 2))
         self._position_control(control, 2)
