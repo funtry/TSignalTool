@@ -325,7 +325,16 @@ class LoggingWellWidget(QWidget):
                 markersize=3,
                 linewidth=1.0,
             )
+            center_wavelength = float(np.median(periods))
+            self.period_ax.axvline(
+                center_wavelength,
+                color="#D55E00",
+                linestyle="--",
+                linewidth=1.2,
+                label=f"估算中心波长 ({center_wavelength:.2f} m)",
+            )
             self.period_ax.invert_yaxis()
+            self.period_ax.legend(fontsize=8)
         else:
             self.period_ax.text(
                 0.5,
@@ -336,7 +345,7 @@ class LoggingWellWidget(QWidget):
                 va="center",
                 color="gray",
             )
-        self.period_ax.set_title("局部周期（峰-峰 / 谷-谷）")
+        self.period_ax.set_title("局部周期及反算中心波长")
         self.period_ax.set_xlabel("周期 (m)")
         self.period_ax.set_ylabel("深度 (m)")
         self.period_ax.grid(True, alpha=0.3)
