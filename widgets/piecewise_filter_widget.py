@@ -47,11 +47,11 @@ MAX_WAVELENGTH = 20.0
 MIN_SEGMENT_THICKNESS = 15.0
 RELATIVE_BANDWIDTH = 0.2
 PERIOD_AXIS_LIMITS = (3.0, 15.0)
-SEGMENT_COLORS = ("#7FFF00", "#FF8C00", "#FF00FF",  "#8B4513")
+SEGMENT_COLORS = ("#7FFF00", "#FF8C00", "#FF00FF",  "#FF00FF")
 RAW_LOG_COLOR = "#C8C8C8"
 CYCLE_COLOR = "#FF0000"
-PEAK_COLOR = "#00FF00"
-OVERLAY_COLOR = "#800080"
+PEAK_COLOR = "#C8C8C8"
+OVERLAY_COLOR = "#0000FF"
 
 # 手动设置预设 7 参数 (z1, z2, z3, x1, x2, x3, x4) 的位置：填写后，加载曲线与
 # 「恢复默认参数」都会采用这组参数；设为 None 则按深度跨度自动生成。
@@ -203,18 +203,9 @@ class PiecewiseFilterWidget(QWidget):
             QSizePolicy.Policy.Expanding,
         )
 
-        self.metrics_label = QLabel()
-        self.metrics_label.setWordWrap(True)
-        self.metrics_label.setStyleSheet("font-size: 13px; font-weight: 600;")
-
-        self.status_label = QLabel()
-        self.status_label.setWordWrap(True)
-
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.addWidget(self.canvas, 1)
-        layout.addWidget(self.metrics_label)
-        layout.addWidget(self.status_label)
 
         self.canvas.mpl_connect("button_press_event", self._show_context_menu)
         self._render()
@@ -506,8 +497,8 @@ class PiecewiseFilterWidget(QWidget):
         self._render_log_axes()
         self._render_period_axes()
         self._render_cycle_axes()
-        self._update_metrics()
-        self._update_status()
+        self._print_metrics()
+        self._print_status()
         self.canvas.draw_idle()
 
     def _prepare_axes(self, axes, title, xlabel):
@@ -594,7 +585,7 @@ class PiecewiseFilterWidget(QWidget):
             )
         axes.legend(
             handles=[transition_patch],
-            labels=[f"拼接过渡带 {overlap:.2f} m"],
+            labels=["拼接过渡带"],
             loc="lower left",
             fontsize=8,
             framealpha=0.85,
@@ -625,8 +616,19 @@ class PiecewiseFilterWidget(QWidget):
                 color=OVERLAY_COLOR,
                 linewidth=0.7,
             )
+        self._apply_cycle_axis_limits(axes)
         self._draw_cycle_peaks(axes)
         axes.legend(handles=self._cycle_legend_handles(), loc="upper right", fontsize=8)
+
+    def _apply_cycle_axis_limits(self, axes):
+        """横坐标按旋回曲线自身振幅自适应，避免被幅值更大的原始曲线压扁。"""
+        lower = float(np.min(self.cycle_signal))
+        upper = float(np.max(self.cycle_signal))
+        span = upper - lower
+        if span <= 0:
+            span = max(abs(upper), 1.0) * 0.2
+        padding = span * 0.05
+        axes.set_xlim(lower - padding, upper + padding)
 
     def _draw_cycle_peaks(self, axes):
         """用横向虚线标出波峰深度，虚线右侧标注自下向上从 1 开始的波峰编号。"""
@@ -684,8 +686,8 @@ class PiecewiseFilterWidget(QWidget):
 
     def _cycle_legend_handles(self):
         handles = [
-            Line2D([], [], color=RAW_LOG_COLOR, linewidth=0.8, label="原始测井曲线"),
-            Line2D([], [], color=CYCLE_COLOR, linewidth=1.15, label="分段滤波拼接旋回曲线"),
+            Line2D([], [], color=RAW_LOG_COLOR, linewidth=0.8, label="原始曲线"),
+            Line2D([], [], color=CYCLE_COLOR, linewidth=1.15, label="旋回曲线"),
         ]
         if self.overlay_signal.size:
             handles.append(
@@ -694,7 +696,7 @@ class PiecewiseFilterWidget(QWidget):
                     [],
                     color=OVERLAY_COLOR,
                     linewidth=0.7,
-                    label=f"叠加曲线（{self.overlay_name}）",
+                    label="叠加曲线",
                 )
             )
         if self.metrics is not None and self.metrics.peak_depths.size:
@@ -707,20 +709,21 @@ class PiecewiseFilterWidget(QWidget):
                     linestyle="--",
                     marker="o",
                     markersize=3.2,
-                    label="波峰深度与编号",
+                    label="波峰编号",
                 )
             )
         return handles
 
-    def _update_metrics(self):
+    def _print_metrics(self):
+        """三项指标与旋回统计输出到控制台，不再占用画布下方空间。"""
         if self.metrics is None:
-            self.metrics_label.setText("加载测井曲线后统计波峰、旋回个数并计算三项指标。")
+            print("加载测井曲线后统计波峰、旋回个数并计算三项指标。")
             return
         metrics = self.metrics
         raw_on_grid = np.interp(self.cycle_depth, self.depth, self.signal)
         raw_energy = oscillation_energy_index(self.cycle_depth, raw_on_grid)
         ratio = metrics.energy_index / raw_energy if raw_energy > 0 else 0.0
-        self.metrics_label.setText(
+        print(
             f"旋回个数 {metrics.cycle_count:.2f} / 先验 {metrics.prior_count:.2f}"
             f"（波峰 {metrics.peak_depths.size} 个；下端 {metrics.bottom_cycle_fraction:.2f}、"
             f"上端 {metrics.top_cycle_fraction:.2f} 个旋回）｜"
@@ -739,9 +742,10 @@ class PiecewiseFilterWidget(QWidget):
         )
         return f"7 参数：{boundaries} m（z0 底界、z4 顶界）；{wavelengths} m"
 
-    def _update_status(self):
+    def _print_status(self):
+        """深度、参数、叠加曲线与 RMSE 等状态信息输出到控制台。"""
         if self.depth.size == 0:
-            self.status_label.setText("在左侧画布右键加载两列 TXT 测井曲线（深度、曲线值）。")
+            print("在左侧画布右键加载两列 TXT 测井曲线（深度、曲线值）。")
             return
         messages = [
             f"深度 {self.depth[0]:g} ~ {self.depth[-1]:g} m，共 {self.depth.size} 个采样点",
@@ -759,7 +763,7 @@ class PiecewiseFilterWidget(QWidget):
             raw_on_grid = np.interp(self.cycle_depth, self.depth, self.signal)
             rmse = float(np.sqrt(np.mean((raw_on_grid - self.cycle_signal) ** 2)))
             messages.append(f"波形-滤波 RMSE = {rmse:.4f}")
-        self.status_label.setText("；".join(messages) + "。")
+        print("；".join(messages) + "。")
 
 
 def main():
