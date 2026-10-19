@@ -3,10 +3,10 @@
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.signal import find_peaks
+from scipy.signal import find_peaks, peak_prominences
 
-DEFAULT_CYCLE_COUNT_PRIOR = 13.09
-PEAK_PROMINENCE_RATIO = 0.05
+DEFAULT_CYCLE_COUNT_PRIOR = 36
+LOCAL_PROMINENCE_RATIO = 0.05
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,8 @@ def analyze_cycle_curve(
     signal: np.ndarray,
     prior_count: float = DEFAULT_CYCLE_COUNT_PRIOR,
     min_cycle_period: float | None = None,
+    reference_depth: np.ndarray | None = None,
+    reference_signal: np.ndarray | None = None,
 ) -> CycleMetrics:
     """统计旋回曲线的波峰与旋回个数，并计算三项评价指标。
 
@@ -47,7 +49,13 @@ def analyze_cycle_curve(
     if prior_count <= 0:
         raise ValueError("地质先验旋回个数必须为正。")
 
-    peak_indices = _find_peaks(depth, signal, min_cycle_period)
+    peak_indices = _find_peaks(
+        depth,
+        signal,
+        min_cycle_period,
+        reference_depth,
+        reference_signal,
+    )
     peak_depths = depth[peak_indices]
     peak_values = signal[peak_indices]
     cycle_count, bottom_fraction, top_fraction = _count_cycles(depth, peak_depths)
@@ -98,15 +106,66 @@ def _find_peaks(
     depth: np.ndarray,
     signal: np.ndarray,
     min_cycle_period: float | None,
+    reference_depth: np.ndarray | None = None,
+    reference_signal: np.ndarray | None = None,
 ) -> np.ndarray:
+    """按最小周期识别候选峰，并以对应原始信号的局部振幅过滤浅峰。"""
     distance = 1
     if min_cycle_period and min_cycle_period > 0:
         depth_step = float(np.median(np.diff(depth)))
         distance = max(1, int(round(0.5 * float(min_cycle_period) / depth_step)))
-    span = float(np.ptp(signal))
-    prominence = PEAK_PROMINENCE_RATIO * span if span > 0 else None
-    peaks, _ = find_peaks(signal, distance=distance, prominence=prominence)
-    return peaks
+    peaks, _ = find_peaks(signal, distance=distance)
+    if peaks.size == 0 or reference_depth is None or reference_signal is None:
+        return peaks
+
+    reference_depth = np.asarray(reference_depth, dtype=np.float64).reshape(-1)
+    reference_signal = np.asarray(reference_signal, dtype=np.float64).reshape(-1)
+    if (
+        reference_depth.size != reference_signal.size
+        or reference_depth.size < 2
+        or not np.all(np.isfinite(reference_depth))
+        or not np.all(np.isfinite(reference_signal))
+        or np.any(np.diff(reference_depth) <= 0)
+        or reference_depth[0] > depth[0]
+        or reference_depth[-1] < depth[-1]
+    ):
+        raise ValueError(
+            "原始参考深度与信号必须等长、有限、严格递增，并覆盖旋回曲线深度。"
+        )
+    reference_values = np.interp(depth, reference_depth, reference_signal)
+
+    if min_cycle_period and min_cycle_period > 0:
+        local_radius = float(min_cycle_period)
+    elif peaks.size > 1:
+        local_radius = float(np.median(np.diff(depth[peaks])))
+    else:
+        local_radius = float(depth[-1] - depth[0]) / 10.0
+
+    cycle_depth_step = float(np.median(np.diff(depth)))
+    prominence_window = max(3, int(round(2.0 * local_radius / cycle_depth_step)) + 1)
+    if prominence_window % 2 == 0:
+        prominence_window += 1
+    maximum_window = signal.size if signal.size % 2 else signal.size - 1
+    prominence_window = min(prominence_window, maximum_window)
+    if prominence_window < 3:
+        prominences = np.zeros(peaks.size, dtype=float)
+    else:
+        prominences = peak_prominences(
+            signal,
+            peaks,
+            wlen=prominence_window,
+        )[0]
+
+    retained = []
+    for peak, prominence in zip(peaks, prominences):
+        peak_depth = float(depth[peak])
+        local_mask = np.abs(depth - peak_depth) <= local_radius
+        local_values = reference_values[local_mask]
+        local_amplitude = float(np.ptp(local_values)) if local_values.size > 1 else 0.0
+        threshold = LOCAL_PROMINENCE_RATIO * local_amplitude
+        if prominence >= threshold:
+            retained.append(int(peak))
+    return np.asarray(retained, dtype=int)
 
 
 def _count_cycles(depth: np.ndarray, peak_depths: np.ndarray) -> tuple[float, float, float]:

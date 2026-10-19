@@ -1,4 +1,4 @@
-"""分段滤波（差分进化）窗口：相同三列布局，中间列叠加代价热力图。"""
+"""分段滤波（差分进化）窗口：原始曲线、分段局部周期与旋回结果。"""
 
 import os
 import sys
@@ -8,9 +8,8 @@ import numpy as np
 from matplotlib import rcParams
 from matplotlib.backend_bases import MouseButton
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-from matplotlib.colors import Normalize
 from matplotlib.figure import Figure
-from matplotlib.lines import Line2D
+from matplotlib.patheffects import Normal, Stroke
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (
     QApplication,
@@ -33,7 +32,13 @@ if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.cycle_metrics import DEFAULT_CYCLE_COUNT_PRIOR, analyze_cycle_curve
+from core.depth_period_spectrum import depth_period_spectrum
 from core.piecewise_filter import piecewise_gaussian_bandpass, transition_width
+from core.piecewise_objective import (
+    BOUNDARY_PENALTY_WEIGHT,
+    boundary_penalty,
+    normalized_objective_losses,
+)
 from core.well_log_loader import load_well_log
 
 rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
@@ -42,14 +47,21 @@ rcParams["axes.unicode_minus"] = False
 SEGMENT_COUNT = 4
 PARAMETER_NAMES = ("z1", "z2", "z3", "x1", "x2", "x3", "x4")
 PARAMETER_COUNT = len(PARAMETER_NAMES)
-MIN_WAVELENGTH = 5.0
+MIN_WAVELENGTH = 2.0
 MAX_WAVELENGTH = 20.0
-MIN_SEGMENT_THICKNESS = 15.0
+MIN_SEGMENT_THICKNESS = 50.0
 RELATIVE_BANDWIDTH = 0.2
 # 中间列横坐标覆盖完整的波长搜索区间（左右各留 1 m 余量），
-# 保证 4 个分段的竖线无论取 5 m 还是 20 m 都能完整显示。
+# 保证各分段的竖线无论取 5 m 还是 20 m 都能完整显示。
 PERIOD_AXIS_LIMITS = (MIN_WAVELENGTH - 1.0, MAX_WAVELENGTH + 1.0)
-SEGMENT_COLORS = ("#FFFF00", "#FFFF00", "#FFFF00",  "#FFFF00")
+# 时频谱周期网格向两侧扩展，使热力图铺满整个中间画布。
+PERIOD_SPECTRUM_MARGIN = max(
+    MIN_WAVELENGTH - PERIOD_AXIS_LIMITS[0],
+    PERIOD_AXIS_LIMITS[1] - MAX_WAVELENGTH,
+)
+# coolwarm 的蓝→白→红方向即“蓝低红高”（coolwarm_r 会反过来）。
+HEATMAP_CMAP = "coolwarm"
+SEGMENT_COLORS = ("#000000", "#000000", "#000000",  "#000000")
 RAW_LOG_COLOR = "#C8C8C8"
 CYCLE_COLOR = "#FF0000"
 PEAK_COLOR = "#C8C8C8"
@@ -57,32 +69,27 @@ OVERLAY_COLOR = "#0000FF"
 
 # ---------------------------------------------------------------- 差分进化参数
 # 以下参数全部写在代码内部，界面不提供输入；需要调整时直接改这里的数值。
-DE_POPULATION_SIZE = 40  # 种群规模（种子数）
-DE_MUTATION_FACTOR = 0.7  # 缩放因子 F（best/1 变异）
-DE_CROSSOVER_RATE = 0.9  # 交叉概率 CR
-DE_MAX_GENERATIONS = 400  # 最大迭代代数
+DE_POPULATION_SIZE = 80  # 种群规模（种子数）
+DE_MUTATION_FACTOR = 0.6  # 缩放因子 F（best/1 变异）
+DE_CROSSOVER_RATE = 0.8  # 交叉概率 CR
+DE_MAX_GENERATIONS = 2000  # 最大迭代代数
+DE_MIN_GENERATIONS = 100  # 达到该代数后才允许按停滞提前停止
 DE_RANDOM_SEED = 20261017  # 随机种子；设为 None 则每次运行随机初始化
-DE_STEP_INTERVAL_MS = 80  # 自动迭代时每代的间隔（毫秒）
+DE_STEP_INTERVAL_MS = 10  # 自动迭代时每代的间隔（毫秒）
 
 # 约束：4 个分段中每一段的持续深度都不小于该阈值（米）。
-DE_MIN_SEGMENT_THICKNESS = 15.0
+DE_MIN_SEGMENT_THICKNESS = 50.0
 
 # 终止条件：连续若干代最优代价的变化都小于容差时停止迭代。
-DE_TOLERANCE = 1e-4  # 相邻两代最优代价之差小于该值视为「变化不大」
-DE_STALL_GENERATIONS = 2  # 连续停滞的代数达到该值即终止
+DE_TOLERANCE = 1e-8  # 相邻两代最优代价之差小于该值视为「变化不大」
+DE_STALL_GENERATIONS = 50  # 连续停滞的代数达到该值即终止
 
-# 代价函数 J = w_e·J_e + w_s·J_s + w_c·J_c 的三项权重。
+# 三项归一化损失的相对权重（和为 1）。
 COST_WEIGHT_ENERGY = 0.3
-COST_WEIGHT_SMOOTHNESS = 0.3
-COST_WEIGHT_CYCLE_COUNT = 0.4
+COST_WEIGHT_SMOOTHNESS = 0.4
+COST_WEIGHT_CYCLE_COUNT = 0.3
 # 理论旋回个数 N_t：提取的旋回个数 N_c 越接近该值，J_c 越小。
-COST_TARGET_CYCLE_COUNT = 32.0
-
-# 中间列代价热力图的网格步长：行按深度、列按局部周期。
-HEATMAP_DEPTH_STEP = 0.125  # 米
-HEATMAP_PERIOD_STEP = 0.02  # m/旋回
-# 反向 coolwarm：代价最大为蓝色，代价最小为红色。
-HEATMAP_CMAP = "coolwarm_r"
+COST_TARGET_CYCLE_COUNT = 36.0
 
 # 手动设置预设 7 参数 (z1, z2, z3, x1, x2, x3, x4) 的位置：填写后，加载曲线与
 # 「恢复默认参数」都会采用这组参数；设为 None 则按深度跨度自动生成。
@@ -201,7 +208,7 @@ class ParameterDialog(QDialog):
 
 
 class PiecewiseFilterDEWidget(QWidget):
-    """左侧原始测井曲线，中间代价热力图+分段局部周期，右侧最优旋回曲线。"""
+    """左侧原始测井曲线，中间分段局部周期，右侧最优旋回曲线。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -209,6 +216,8 @@ class PiecewiseFilterDEWidget(QWidget):
 
         self.depth = np.asarray([], dtype=float)
         self.signal = np.asarray([], dtype=float)
+        self._period_spectrum_computed = False
+        self._period_spectrum = None
         self.boundaries = []
         self.wavelengths = []
         self.preset_note = ""
@@ -227,8 +236,6 @@ class PiecewiseFilterDEWidget(QWidget):
         self._de_best_cost = float("inf")
         self._de_finished = False
         self._de_stall_generations = 0
-
-        self._heat_costs = None
 
         self.figure = Figure(figsize=(15, 8), dpi=100)
         self.log_axes, self.period_axes, self.cycle_axes = self.figure.subplots(1, 3)
@@ -289,6 +296,8 @@ class PiecewiseFilterDEWidget(QWidget):
 
         self.depth = depth
         self.signal = signal
+        self._period_spectrum_computed = False
+        self._period_spectrum = None
         self._reset_parameters()
         self._clip_overlay_curve()
         self._refresh_result()
@@ -444,30 +453,52 @@ class PiecewiseFilterDEWidget(QWidget):
             [1.0 / value for value in reversed(wavelengths)],
         )
 
-    def _cost_terms(self, metrics, cycle_signal):
-        """返回 (J_e, J_s, J_c) 三个分项：
+    def _cost_terms(self, metrics, cycle_depth, cycle_signal):
+        """返回统一为 [0, 1] 且越低越好的三项无量纲损失。"""
+        return normalized_objective_losses(
+            self.depth,
+            self.signal,
+            cycle_depth,
+            cycle_signal,
+            metrics.cycle_count,
+            COST_TARGET_CYCLE_COUNT,
+        )
 
-        J_e = -(1/N)·Σ O²(z_i)                              平均振荡能量（取负号便于最小化）
-        J_s = 1/(N-2)·Σ (O(z_{i+1}) - 2O(z_i) + O(z_{i-1}))²  二阶差分平方均值
-        J_c = (N_c - N_t)²                                  旋回个数偏差平方
-        """
-        signal = np.asarray(cycle_signal, dtype=float)
-        energy_term = -float(np.mean(signal**2)) if signal.size else 0.0
-        if signal.size >= 3:
-            second_difference = signal[2:] - 2.0 * signal[1:-1] + signal[:-2]
-            smoothness_term = float(np.mean(second_difference**2))
-        else:
-            smoothness_term = 0.0
-        count_term = float((metrics.cycle_count - COST_TARGET_CYCLE_COUNT) ** 2)
-        return energy_term, smoothness_term, count_term
+    def _get_period_spectrum(self):
+        if not self._period_spectrum_computed:
+            self._period_spectrum = depth_period_spectrum(
+                self.depth,
+                self.signal,
+                MIN_WAVELENGTH,
+                MAX_WAVELENGTH,
+                period_margin=PERIOD_SPECTRUM_MARGIN,
+            )
+            self._period_spectrum_computed = True
+        return self._period_spectrum
 
-    def _weighted_cost(self, metrics, cycle_signal):
-        """综合代价 J = w_e·J_e + w_s·J_s + w_c·J_c。"""
-        energy_term, smoothness_term, count_term = self._cost_terms(metrics, cycle_signal)
-        return (
+    def _boundary_penalty(self, parameters):
+        return boundary_penalty(
+            parameters,
+            float(self.depth[0]),
+            float(self.depth[-1]),
+            self._de_minimum_thickness(),
+            MIN_WAVELENGTH,
+            MAX_WAVELENGTH,
+        )
+
+    def _weighted_cost(self, parameters, metrics, cycle_depth, cycle_signal):
+        """合成归一化损失，并加上弱化边界解的软惩罚。"""
+        energy_term, smoothness_term, count_term = self._cost_terms(
+            metrics, cycle_depth, cycle_signal
+        )
+        weighted_loss = (
             COST_WEIGHT_ENERGY * energy_term
             + COST_WEIGHT_SMOOTHNESS * smoothness_term
             + COST_WEIGHT_CYCLE_COUNT * count_term
+        )
+        return (
+            weighted_loss
+            + BOUNDARY_PENALTY_WEIGHT * self._boundary_penalty(parameters)
         )
 
     def _evaluate_solution(self, parameters):
@@ -486,11 +517,14 @@ class PiecewiseFilterDEWidget(QWidget):
                 cycle_signal,
                 prior_count=COST_TARGET_CYCLE_COUNT,
                 min_cycle_period=float(np.min(wavelengths)),
+                reference_depth=self.depth,
+                reference_signal=self.signal,
             )
+            cost = self._weighted_cost(parameters, metrics, cycle_depth, cycle_signal)
         except ValueError:
             return None
         return (
-            self._weighted_cost(metrics, cycle_signal),
+            cost,
             cycle_depth,
             cycle_signal,
             metrics,
@@ -502,66 +536,14 @@ class PiecewiseFilterDEWidget(QWidget):
         result = self._evaluate_solution(parameters)
         return float("inf") if result is None else float(result[0])
 
-    def _initialize_heatmap(self):
-        """建立 M×N 代价矩阵：0.125 m 深度步长 × 0.02 m/旋回周期步长。
-
-        初值为 inf（尚未评估，按色带最大值画成蓝色），随迭代把更小的代价写回
-        对应格子（逐渐变红）。
-        """
-        top = float(self.depth[0])
-        bottom = float(self.depth[-1])
-        rows = max(1, int(np.ceil((bottom - top) / HEATMAP_DEPTH_STEP)))
-        columns = max(
-            1,
-            int(
-                np.ceil(
-                    (PERIOD_AXIS_LIMITS[1] - PERIOD_AXIS_LIMITS[0]) / HEATMAP_PERIOD_STEP
-                )
-            ),
-        )
-        self._heat_costs = np.full((rows, columns), np.inf, dtype=float)
-
-    def _record_heat(self, parameters, cost):
-        """把解的代价写入其 4 段覆盖的格子；已有更小代价时保持原值。"""
-        if self._heat_costs is None or not np.isfinite(cost):
-            return
-        top = float(self.depth[0])
-        rows, columns = self._heat_costs.shape
-        period_origin = float(PERIOD_AXIS_LIMITS[0])
-        for index in range(SEGMENT_COUNT):
-            column = int(
-                round((float(parameters[3 + index]) - period_origin) / HEATMAP_PERIOD_STEP)
-            )
-            if not 0 <= column < columns:
-                continue
-            if index == SEGMENT_COUNT - 1:
-                segment_top = top
-            else:
-                segment_top = float(parameters[index])
-            if index == 0:
-                segment_bottom = float(self.depth[-1])
-            else:
-                segment_bottom = float(parameters[index - 1])
-            first = max(
-                0, int(round((segment_top - top) / HEATMAP_DEPTH_STEP))
-            )
-            last = min(
-                rows, int(round((segment_bottom - top) / HEATMAP_DEPTH_STEP))
-            )
-            if last <= first:
-                continue
-            cell = self._heat_costs[first:last, column]
-            cell[cost < cell] = cost
-
     def _restart_iteration(self):
-        """加载数据或参数变化后重建种群、清空代价矩阵并开始自动迭代。"""
+        """加载数据或参数变化后重建种群并开始自动迭代。"""
         self.iteration_timer.stop()
         self._de_finished = False
         self._de_generation = 0
         self._de_stall_generations = 0
         self._de_best_parameters = None
         self._de_best_cost = float("inf")
-        self._heat_costs = None
         self.step_button.setEnabled(True)
         self.step_button.setText("暂停")
         if self.depth.size < 2:
@@ -571,7 +553,6 @@ class PiecewiseFilterDEWidget(QWidget):
             self.step_button.setEnabled(False)
             return
 
-        self._initialize_heatmap()
         self._de_rng = np.random.default_rng(DE_RANDOM_SEED)
         top = float(self.depth[0])
         bottom = float(self.depth[-1])
@@ -618,7 +599,6 @@ class PiecewiseFilterDEWidget(QWidget):
             crossover[self._de_rng.integers(PARAMETER_COUNT)] = True
             trial = self._repair_parameters(np.where(crossover, mutant, population[index]))
             trial_cost = self._evaluate_cost(trial)
-            self._record_heat(trial, trial_cost)
             if trial_cost < costs[index]:
                 population[index] = trial
                 costs[index] = trial_cost
@@ -628,8 +608,6 @@ class PiecewiseFilterDEWidget(QWidget):
         if costs[best_index] < self._de_best_cost:
             self._de_best_parameters = population[best_index].copy()
             self._de_best_cost = float(costs[best_index])
-        self._record_heat(population[best_index], float(costs[best_index]))
-
     def _apply_best_solution(self):
         """把当前最优解写成界面上的 7 参数、旋回曲线与三项指标。"""
         if self._de_best_parameters is None or self.depth.size < 2:
@@ -654,10 +632,13 @@ class PiecewiseFilterDEWidget(QWidget):
             self._de_stall_generations = 0
         self._apply_best_solution()
         self._render()
-        return self._de_stall_generations >= DE_STALL_GENERATIONS
+        return (
+            self._de_generation >= DE_MIN_GENERATIONS
+            and self._de_stall_generations >= DE_STALL_GENERATIONS
+        )
 
     def _iterate_once(self):
-        """自动迭代的一次节拍：进化一代、刷新热力图与第三列最优曲线。"""
+        """自动迭代的一次节拍：进化一代并刷新当前最优曲线。"""
         if self._de_population.size == 0 or self._de_finished:
             return
         if self._de_generation >= DE_MAX_GENERATIONS:
@@ -714,12 +695,15 @@ class PiecewiseFilterDEWidget(QWidget):
             for name, value in zip(PARAMETER_NAMES, self._de_best_parameters)
         )
         energy_term, smoothness_term, count_term = self._cost_terms(
-            self.metrics, self.cycle_signal
+            self.metrics, self.cycle_depth, self.cycle_signal
         )
+        penalty = self._boundary_penalty(self._de_best_parameters)
         print(
             f"{prefix}：J={self._de_best_cost:.4f}"
-            f"（J_e={energy_term:.4f}，J_s={smoothness_term:.6f}，"
-            f"J_c={count_term:.4f}）；旋回个数 {self.metrics.cycle_count:.2f}"
+            f"（L_E={energy_term:.4f}，L_S={smoothness_term:.4f}，"
+            f"L_C={count_term:.4f}，边界惩罚={penalty:.4f}"
+            f"（加权 {BOUNDARY_PENALTY_WEIGHT * penalty:.4f}））；"
+            f"旋回个数 {self.metrics.cycle_count:.2f}"
             f"（目标 {COST_TARGET_CYCLE_COUNT:g}）；最优 7 参数 {values}"
         )
 
@@ -743,6 +727,8 @@ class PiecewiseFilterDEWidget(QWidget):
                     self.cycle_signal,
                     prior_count=COST_TARGET_CYCLE_COUNT,
                     min_cycle_period=float(np.min(self.wavelengths)),
+                    reference_depth=self.depth,
+                    reference_signal=self.signal,
                 )
             except ValueError as error:
                 QMessageBox.warning(self, "分段滤波失败", str(error))
@@ -928,36 +914,6 @@ class PiecewiseFilterDEWidget(QWidget):
             return
         self.log_axes.plot(self.signal, self.depth, color="#0000FF", linewidth=1.0)
 
-    def _draw_heatmap(self, axes):
-        """把 M×N 代价矩阵画成热力图：蓝色代表代价最大，红色代表代价最小。
-
-        色带按已评估格子的最小/最大值自适应；尚未评估的格子取最大值端，因此
-        初始化时整幅图全蓝，只有被更小代价覆盖过的格子才会逐步变红。图例隐藏。
-        """
-        if self._heat_costs is None or self.depth.size < 2:
-            return
-        evaluated = np.isfinite(self._heat_costs)
-        lower = float(np.min(self._heat_costs[evaluated])) if evaluated.any() else 0.0
-        upper = float(np.max(self._heat_costs[evaluated])) if evaluated.any() else 1.0
-        if upper - lower < 1e-9:
-            lower = upper - 1.0
-        display = np.where(evaluated, self._heat_costs, upper)
-        axes.imshow(
-            display,
-            extent=(
-                PERIOD_AXIS_LIMITS[0],
-                PERIOD_AXIS_LIMITS[1],
-                float(self.depth[-1]),
-                float(self.depth[0]),
-            ),
-            origin="upper",
-            aspect="auto",
-            cmap=HEATMAP_CMAP,
-            norm=Normalize(vmin=lower, vmax=upper),
-            interpolation="nearest",
-            zorder=0,
-        )
-
     def _render_period_axes(self):
         axes = self.period_axes
         title = "分段局部周期"
@@ -965,10 +921,35 @@ class PiecewiseFilterDEWidget(QWidget):
             title = f"{title}（第 {self._de_generation} 代，最优代价 {self._de_best_cost:.4f}）"
         self._prepare_axes(axes, title, "局部周期 x（m/旋回）")
         axes.set_xlim(*PERIOD_AXIS_LIMITS)
-        self._draw_heatmap(axes)
         if not self.wavelengths:
             self._draw_placeholder(axes, "加载测井曲线后显示分段局部周期")
             return
+
+        spectrum = self._get_period_spectrum()
+        if spectrum is not None:
+            periods, spectrum_depths, power = spectrum
+            axes.imshow(
+                power,
+                origin="upper",
+                extent=(
+                    float(periods[0]),
+                    float(periods[-1]),
+                    float(spectrum_depths[-1]),
+                    float(spectrum_depths[0]),
+                ),
+                aspect="auto",
+                cmap=HEATMAP_CMAP,
+                vmin=0.0,
+                vmax=1.0,
+                alpha=0.5,
+                interpolation="bicubic",
+                zorder=0,
+            )
+            axes.set_xlim(*PERIOD_AXIS_LIMITS)
+            if self.depth.size >= 2:
+                axes.set_ylim(float(self.depth[-1]), float(self.depth[0]))
+        else:
+            self._draw_placeholder(axes, "采样点不足，无法计算局部周期谱")
 
         for guide in (MIN_WAVELENGTH, MAX_WAVELENGTH):
             axes.axvline(guide, color="#999999", linewidth=0.8, linestyle=":")
@@ -986,6 +967,8 @@ class PiecewiseFilterDEWidget(QWidget):
                 color=color,
                 linewidth=2.6,
                 solid_capstyle="butt",
+                path_effects=[Stroke(linewidth=4.2, foreground="white"), Normal()],
+                zorder=3,
             )
             left_aligned = wavelength <= axis_middle
             axes.annotate(
@@ -997,6 +980,12 @@ class PiecewiseFilterDEWidget(QWidget):
                 color=color,
                 fontsize=9,
                 va="center",
+                bbox={
+                    "facecolor": "white",
+                    "alpha": 0.85,
+                    "edgecolor": "none",
+                    "pad": 1,
+                },
             )
             if index:
                 axes.plot(
@@ -1007,21 +996,13 @@ class PiecewiseFilterDEWidget(QWidget):
                     linestyle="--",
                 )
 
-        transition_patch = None
         for boundary in self._edges()[1:-1]:
-            transition_patch = axes.axhspan(
+            axes.axhspan(
                 boundary - overlap / 2.0,
                 boundary + overlap / 2.0,
                 color="#000000",
                 alpha=0.08,
             )
-        axes.legend(
-            handles=[transition_patch],
-            labels=["拼接过渡带"],
-            loc="lower left",
-            fontsize=8,
-            framealpha=0.85,
-        )
 
     def _render_cycle_axes(self):
         axes = self.cycle_axes
@@ -1034,12 +1015,14 @@ class PiecewiseFilterDEWidget(QWidget):
             self.depth,
             color=RAW_LOG_COLOR,
             linewidth=0.8,
+            zorder=1,
         )
         axes.plot(
             self.cycle_signal,
             self.cycle_depth,
             color=CYCLE_COLOR,
             linewidth=1.15,
+            zorder=4,
         )
         if self.overlay_signal.size:
             axes.plot(
@@ -1047,10 +1030,10 @@ class PiecewiseFilterDEWidget(QWidget):
                 self.overlay_depth,
                 color=OVERLAY_COLOR,
                 linewidth=0.7,
+                zorder=2,
             )
         self._apply_cycle_axis_limits(axes)
         self._draw_cycle_peaks(axes)
-        axes.legend(handles=self._cycle_legend_handles(), loc="upper right", fontsize=8)
 
     def _apply_cycle_axis_limits(self, axes):
         """横坐标按旋回曲线自身振幅自适应，避免被幅值更大的原始曲线压扁。"""
@@ -1076,6 +1059,7 @@ class PiecewiseFilterDEWidget(QWidget):
                 linewidth=0.8,
                 linestyle="--",
                 alpha=0.75,
+                zorder=1,
             )
             axes.text(
                 0.98,
@@ -1094,6 +1078,7 @@ class PiecewiseFilterDEWidget(QWidget):
             marker="o",
             markersize=3.2,
             color=PEAK_COLOR,
+            zorder=1,
         )
         axes.text(
             0.02,
@@ -1116,49 +1101,29 @@ class PiecewiseFilterDEWidget(QWidget):
             color="#808080",
         )
 
-    def _cycle_legend_handles(self):
-        handles = [
-            Line2D([], [], color=RAW_LOG_COLOR, linewidth=0.8, label="原始曲线"),
-            Line2D([], [], color=CYCLE_COLOR, linewidth=1.15, label="旋回曲线"),
-        ]
-        if self.overlay_signal.size:
-            handles.append(
-                Line2D(
-                    [],
-                    [],
-                    color=OVERLAY_COLOR,
-                    linewidth=0.7,
-                    label="叠加曲线",
-                )
-            )
-        if self.metrics is not None and self.metrics.peak_depths.size:
-            handles.append(
-                Line2D(
-                    [],
-                    [],
-                    color=PEAK_COLOR,
-                    linewidth=0.8,
-                    linestyle="--",
-                    marker="o",
-                    markersize=3.2,
-                    label="波峰编号",
-                )
-            )
-        return handles
-
     def _print_metrics(self):
         """代价分项与旋回统计输出到控制台，不再占用画布下方空间。"""
         if self.metrics is None:
-            print("加载测井曲线后统计波峰、旋回个数与三项代价分项。")
+            print("加载测井曲线后统计波峰、旋回个数与代价分项。")
             return
         metrics = self.metrics
         energy_term, smoothness_term, count_term = self._cost_terms(
-            metrics, self.cycle_signal
+            metrics, self.cycle_depth, self.cycle_signal
+        )
+        parameters = self.get_parameters()
+        penalty = self._boundary_penalty(parameters)
+        total = self._weighted_cost(
+            parameters,
+            metrics,
+            self.cycle_depth,
+            self.cycle_signal,
         )
         print(
             f"旋回个数 {metrics.cycle_count:.2f}"
             f"（目标 {COST_TARGET_CYCLE_COUNT:g}，波峰 {metrics.peak_depths.size} 个）｜"
-            f"J_e={energy_term:.4f}｜J_s={smoothness_term:.6f}｜J_c={count_term:.4f}"
+            f"L_E={energy_term:.4f}｜L_S={smoothness_term:.4f}｜"
+            f"L_C={count_term:.4f}｜边界惩罚={penalty:.4f}"
+            f"（加权 {BOUNDARY_PENALTY_WEIGHT * penalty:.4f}）｜J={total:.4f}"
         )
 
     def _parameter_text(self):

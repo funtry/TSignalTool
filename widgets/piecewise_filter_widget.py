@@ -349,6 +349,8 @@ class PiecewiseFilterWidget(QWidget):
                     self.cycle_signal,
                     prior_count=DEFAULT_CYCLE_COUNT_PRIOR,
                     min_cycle_period=float(np.min(self.wavelengths)),
+                    reference_depth=self.depth,
+                    reference_signal=self.signal,
                 )
             except ValueError as error:
                 QMessageBox.warning(self, "分段滤波失败", str(error))
