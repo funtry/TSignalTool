@@ -36,7 +36,9 @@ from core.depth_period_spectrum import depth_period_spectrum
 from core.piecewise_filter import piecewise_gaussian_bandpass, transition_width
 from core.piecewise_objective import (
     BOUNDARY_PENALTY_WEIGHT,
+    COST_TARGET_CYCLE_COUNT,
     boundary_penalty,
+    combined_objective_cost,
     normalized_objective_losses,
 )
 from core.well_log_loader import load_well_log
@@ -83,13 +85,6 @@ DE_MIN_SEGMENT_THICKNESS = 40.0
 # 终止条件：连续若干代最优代价的变化都小于容差时停止迭代。
 DE_TOLERANCE = 1e-8  # 相邻两代最优代价之差小于该值视为「变化不大」
 DE_STALL_GENERATIONS = 50  # 连续停滞的代数达到该值即终止
-
-# 三项归一化损失的相对权重（和为 1）。
-COST_WEIGHT_ENERGY = 0.3
-COST_WEIGHT_SMOOTHNESS = 0.4
-COST_WEIGHT_CYCLE_COUNT = 0.3
-# 理论旋回个数 N_t：提取的旋回个数 N_c 越接近该值，J_c 越小。
-COST_TARGET_CYCLE_COUNT = 36.0
 
 # 手动设置预设 5 参数 (z1, z2, x1, x2, x3) 的位置：填写后，加载曲线与
 # 「恢复默认参数」都会采用这组参数；设为 None 则按深度跨度自动生成。
@@ -503,14 +498,11 @@ class PiecewiseFilterDEWidget(QWidget):
         energy_term, smoothness_term, count_term = self._cost_terms(
             metrics, cycle_depth, cycle_signal
         )
-        weighted_loss = (
-            COST_WEIGHT_ENERGY * energy_term
-            + COST_WEIGHT_SMOOTHNESS * smoothness_term
-            + COST_WEIGHT_CYCLE_COUNT * count_term
-        )
-        return (
-            weighted_loss
-            + BOUNDARY_PENALTY_WEIGHT * self._boundary_penalty(parameters)
+        return combined_objective_cost(
+            energy_term,
+            smoothness_term,
+            count_term,
+            self._boundary_penalty(parameters),
         )
 
     def _evaluate_solution(self, parameters):

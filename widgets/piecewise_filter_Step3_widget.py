@@ -38,7 +38,9 @@ from core.cycle_metrics import DEFAULT_CYCLE_COUNT_PRIOR, analyze_cycle_curve
 from core.piecewise_filter import piecewise_gaussian_bandpass, transition_width
 from core.piecewise_objective import (
     BOUNDARY_PENALTY_WEIGHT,
+    COST_TARGET_CYCLE_COUNT,
     boundary_penalty,
+    combined_objective_cost,
     normalized_objective_losses,
 )
 from core.well_log_loader import load_well_log
@@ -49,9 +51,9 @@ rcParams["axes.unicode_minus"] = False
 SEGMENT_COUNT = 3
 PARAMETER_NAMES = ("z1", "z2", "x1", "x2", "x3")
 PARAMETER_COUNT = len(PARAMETER_NAMES)
-MIN_WAVELENGTH = 3.0
-MAX_WAVELENGTH = 15.0
-MIN_SEGMENT_THICKNESS = 50.0
+MIN_WAVELENGTH = 4.0
+MAX_WAVELENGTH = 20.0
+MIN_SEGMENT_THICKNESS = 40.0
 RELATIVE_BANDWIDTH = 0.2
 # 穷举搜索网格：每个分界深度与局部周期的候选间隔。
 HEATMAP_DEPTH_STEP = 10.0  # 米
@@ -70,13 +72,6 @@ RAW_LOG_COLOR = "#C8C8C8"
 CYCLE_COLOR = "#FF0000"
 PEAK_COLOR = "#C8C8C8"
 OVERLAY_COLOR = "#0000FF"
-
-# 三项归一化损失的相对权重（和为 1）。
-COST_WEIGHT_ENERGY = 0.3
-COST_WEIGHT_SMOOTHNESS = 0.3
-COST_WEIGHT_CYCLE_COUNT = 0.4
-# 理论旋回个数 N_t：提取的旋回个数 N_c 越接近该值，J_c 越小。
-COST_TARGET_CYCLE_COUNT = 32.0
 
 # 反向 coolwarm：代价最大为蓝色，代价最小为红色。
 HEATMAP_CMAP = "coolwarm_r"
@@ -478,14 +473,11 @@ class PiecewiseFilterStepWidget(QWidget):
         energy_term, smoothness_term, count_term = self._cost_terms(
             metrics, cycle_depth, cycle_signal
         )
-        weighted_loss = (
-            COST_WEIGHT_ENERGY * energy_term
-            + COST_WEIGHT_SMOOTHNESS * smoothness_term
-            + COST_WEIGHT_CYCLE_COUNT * count_term
-        )
-        return (
-            weighted_loss
-            + BOUNDARY_PENALTY_WEIGHT * self._boundary_penalty(parameters)
+        return combined_objective_cost(
+            energy_term,
+            smoothness_term,
+            count_term,
+            self._boundary_penalty(parameters),
         )
 
     def _evaluate_solution(self, parameters):

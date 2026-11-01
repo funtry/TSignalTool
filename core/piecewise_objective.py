@@ -4,6 +4,25 @@ import numpy as np
 
 BOUNDARY_MARGIN_RATIO = 0.1
 BOUNDARY_PENALTY_WEIGHT = 0.15
+COST_WEIGHT_ENERGY = 0.3
+COST_WEIGHT_SMOOTHNESS = 0.4
+COST_WEIGHT_CYCLE_COUNT = 0.3
+COST_TARGET_CYCLE_COUNT = 36.0
+
+
+def combined_objective_cost(
+    energy_loss: float,
+    smoothness_loss: float,
+    cycle_count_loss: float,
+    boundary_loss: float,
+) -> float:
+    """计算 J = 0.3 L_E + 0.4 L_S + 0.3 L_C + 0.15 P_b。"""
+    return float(
+        COST_WEIGHT_ENERGY * energy_loss
+        + COST_WEIGHT_SMOOTHNESS * smoothness_loss
+        + COST_WEIGHT_CYCLE_COUNT * cycle_count_loss
+        + BOUNDARY_PENALTY_WEIGHT * boundary_loss
+    )
 
 
 def _mean_squared_second_difference(values: np.ndarray) -> float:

@@ -63,7 +63,7 @@ PERIOD_SPECTRUM_MARGIN = max(
 # 时频图滑动窗口包含的周期数；2.5 个周期兼顾深度定位与周期可分辨性。
 LOCAL_SPECTRUM_WINDOW_CYCLES = 4.0
 # coolwarm 的蓝→白→红方向即“蓝低红高”（coolwarm_r 会反过来）。
-HEATMAP_CMAP = "coolwarm"
+HEATMAP_CMAP = "jet"#"coolwarm"
 SEGMENT_COLORS = ("#000000", "#000000", "#000000")
 RAW_LOG_COLOR = "#C8C8C8"
 CYCLE_COLOR = "#FF0000"
